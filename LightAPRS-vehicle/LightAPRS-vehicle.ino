@@ -14,19 +14,21 @@
 #define PIN_DRA_RX  22
 #define PIN_DRA_TX  23
 
-#define ADC_REFERENCE REF_3V3
-#define OPEN_SQUELCH false
 
-#define GpsON         digitalWrite(GpsVccPin, LOW)//PNP
+#define ADC_REFERENCE REF_3V3
+#define OPEN_SQUELCH true
+
+#define GpsON         digitalWrite(GpsVccPin, LOW) //PNP
 #define GpsOFF        digitalWrite(GpsVccPin, HIGH)
 #define RfON          digitalWrite(RfPDPin, HIGH)
 #define RfOFF         digitalWrite(RfPDPin, LOW)
 #define RfPwrHigh     pinMode(RfPwrHLPin, INPUT)
 #define RfPwrLow      pinMode(RfPwrHLPin, OUTPUT);digitalWrite(RfPwrHLPin, LOW)
-#define RfPttON       digitalWrite(RfPttPin, HIGH)//NPN
+#define RfPttON       digitalWrite(RfPttPin, HIGH) //NPN
 #define RfPttOFF      digitalWrite(RfPttPin, LOW)
 #define AprsPinInput  pinMode(12,INPUT);pinMode(13,INPUT);pinMode(14,INPUT);pinMode(15,INPUT)
 #define AprsPinOutput pinMode(12,OUTPUT);pinMode(13,OUTPUT);pinMode(14,OUTPUT);pinMode(15,OUTPUT)
+//#define AprsPinLow      digitalWrite(12,LOW);digitalWrite(13,LOW);digitalWrite(14,LOW);digitalWrite(15,LOW)
 
 
 //****************************************************************************
@@ -37,22 +39,24 @@ bool alternateSymbolTable = false ; //false = '/' , true = '\'
 
 char Frequency[9] = "144.8000"; //default frequency. 144.3900 for US, 144.8000 for Europe
 
-char comment[50] = "GE07CAR"; // Max 50 char
+char comment[50] = "GE07CAR"; // Max 43 char
 char StatusMessage[50] = "George LightAPRS-1.0 http://m1geo.com";
 //*****************************************************************************
 
 
-unsigned int BeaconInterval = 120;     // seconds sleep for next beacon (TX).
+unsigned int BeaconInterval = 90;     // seconds sleep for next beacon (TX).
 unsigned int MinimumInterval = 5;      // maximum rate, packet every <this> seconds.
 int          CourseChangeBeacon = 40;  // degrees before sending beacon
-unsigned int TxDelay = 500;            // milliseeconds tx delay
+unsigned int TxDelay = 350;            // milliseeconds tx delay
 boolean aliveStatus = true;            // for tx status message on first wake-up just once.
 int pathSize = 2;                      // 2 for WIDE1-N,WIDE2-N ; 1 for WIDE2-N
 
 static char telemetry_buff[100];// telemetry buffer
-uint16_t TxCount = 1;
+uint16_t TxCount = 0;
+uint16_t RxCount = 0;
 int previous_course = 0;
 unsigned long previous_location_time = 0;
+unsigned long previous_status_time = 0;
 
 TinyGPSPlus gps;
 Adafruit_BMP085 bmp;
@@ -77,7 +81,7 @@ void setup() {
   Serial.begin(115200);
   Serial1.begin(9600);
 
-  Serial.println(F("George M1GEO"));  
+  Serial.println(F("George M1GEO"));
   Serial.println(F("Starting..."));
   
   APRS_init(ADC_REFERENCE, OPEN_SQUELCH);
@@ -88,13 +92,13 @@ void setup() {
   APRS_setPath2("WIDE2", 1);
   APRS_useAlternateSymbolTable(alternateSymbolTable);
   APRS_setSymbol(Symbol);
-  //increase following value (for example to 500UL) if you experience packet loss/decode issues.
-  APRS_setPreamble(350UL);
+  APRS_setPreamble(1000UL); // DRA818 is slow!
+  APRS_setTail(100UL);
   APRS_setPathSize(pathSize);
-  APRS_setPower(1);
-  APRS_setHeight(0);
-  APRS_setGain(3);
-  APRS_setDirectivity(0);
+  //APRS_setPower(1);
+  //APRS_setHeight(0);
+  //APRS_setGain(3);
+  //APRS_setDirectivity(0);
   AprsPinInput;
 
   wdt_reset();
@@ -102,30 +106,39 @@ void setup() {
   configDra818(Frequency);
   
   bmp.begin();
+
+  APRS_printSettings();
 }
 
 void loop() {
   wdt_reset();
+
+  updateGpsData(2000);
+  gpsDebug();
   
   if (aliveStatus) {
-    //send status tx on startup once (before gps fix)
-    Serial.println(F("Sending wakeup messages"));
     sendCompilation();
     wdt_reset();
     delay(1000);
     sendStatus();
-    Serial.println(F("Wakeup sent"));
+    previous_status_time = millis();
     aliveStatus = false;
     wdt_reset();
   }
 
-  updateGpsData(2000);
-  gpsDebug();
+  //send status message every 10 minutes
+  if ((millis() - previous_status_time) > 600000UL) {
+    wdt_reset();
+    sendStatus();
+    previous_status_time = millis();
+  }
 
   if ((gps.location.age() < 1000 || gps.location.isUpdated()) && gps.location.isValid()) {
     if (gps.satellites.isValid() && (gps.satellites.value() > 3)) {
       updatePosition();
       updateTelemetry();
+
+      wdt_reset();
 
       // calculate the absoloute difference of course.
       int course_change = gps.course.deg();
@@ -145,11 +158,6 @@ void loop() {
         }
         
         APRS_setPathSize(pathSize);
-  
-        //send status message every 60 minutes
-        if (gps.time.minute() == 00) {
-          sendStatus();
-        }
         
         wdt_reset();
         sendLocation();
@@ -157,6 +165,7 @@ void loop() {
       }
       
       freeMem();
+      Pkts();
       Serial.flush();
       
     } else {
@@ -167,6 +176,7 @@ void loop() {
 
 void aprs_msg_callback(struct AX25Msg *msg) {
   //do not remove this function, necessary for LibAPRS
+  RxCount++;
 }
 
 byte configDra818(char *freq) {
@@ -271,45 +281,39 @@ void updateTelemetry() {
   telemetry_buff[20] = 'T';
   telemetry_buff[21] = 'X';
   telemetry_buff[22] = 'P';
-  telemetry_buff[23] = ' '; float tempC = bmp.readTemperature();//-21.4;//
-  dtostrf(tempC, 6, 2, telemetry_buff + 24);
-  telemetry_buff[30] = 'C';
-  telemetry_buff[31] = ' '; float pressure = bmp.readPressure() / 100.0; //Pa to hPa
-  dtostrf(pressure, 7, 2, telemetry_buff + 32);
-  telemetry_buff[39] = 'h';
-  telemetry_buff[40] = 'P';
-  telemetry_buff[41] = 'a';
-  telemetry_buff[42] = ' ';
-  dtostrf(readBatt(), 5, 2, telemetry_buff + 43);
-  telemetry_buff[48] = 'V';
+  telemetry_buff[23] = ' '; 
+  sprintf(telemetry_buff + 24, "%03d", TxCount);
+  telemetry_buff[27] = 'R';
+  telemetry_buff[28] = 'X';
+  telemetry_buff[29] = 'P';
+  telemetry_buff[30] = ' '; 
+  float tempC = bmp.readTemperature();//-21.4;//
+  dtostrf(tempC, 6, 2, telemetry_buff + 31);
+  telemetry_buff[37] = 'C';
+  telemetry_buff[38] = ' '; float pressure = bmp.readPressure() / 100.0; //Pa to hPa
+  dtostrf(pressure, 7, 2, telemetry_buff + 39);
+  telemetry_buff[46] = 'h';
+  telemetry_buff[47] = 'P';
+  telemetry_buff[48] = 'a';
   telemetry_buff[49] = ' ';
-  sprintf(telemetry_buff + 50, "%02d", gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
-  telemetry_buff[52] = 'S';
-  telemetry_buff[53] = ' ';
-  sprintf(telemetry_buff + 54, "%s", comment);
+  dtostrf(readBatt(), 5, 2, telemetry_buff + 50);
+  telemetry_buff[55] = 'V';
+  telemetry_buff[56] = ' ';
+  sprintf(telemetry_buff + 57, "%02d", gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
+  telemetry_buff[59] = 'S';
+  telemetry_buff[60] = ' ';
+  sprintf(telemetry_buff + 61, "%s", comment);
 }
 
 void sendLocation() {
-  Serial.println(F("Location sending with comment"));
-  
-  int hh = gps.time.hour();
-  int mm = gps.time.minute();
-  int ss = gps.time.second();
-
-  char timestamp_buff[7];
-
-  sprintf(timestamp_buff, "%02d", gps.time.isValid() ? (int)gps.time.hour() : 0);
-  sprintf(timestamp_buff + 2, "%02d", gps.time.isValid() ? (int)gps.time.minute() : 0);
-  sprintf(timestamp_buff + 4, "%02d", gps.time.isValid() ? (int)gps.time.second() : 0);
-  timestamp_buff[6] = 'h';
+  Serial.print(F("Location sending with comment: "));
+  Serial.println(telemetry_buff); // telemetry buffer
   AprsPinOutput;
   RfPttON;
   delay(TxDelay);
-
-  APRS_sendLocWtTmStmp(telemetry_buff, strlen(telemetry_buff), timestamp_buff); //beacon with timestamp
+  APRS_sendLoc(telemetry_buff, strlen(telemetry_buff));
   delay(50);
   while (digitalRead(1)); //LibAprs TX Led pin PB1 - wait for TX to finish
-  delay(50);
   RfPttOFF;
   AprsPinInput;
   TxCount++;
@@ -320,37 +324,25 @@ void sendStatus() {
   AprsPinOutput;
   RfPttON;
   delay(TxDelay);
-
   APRS_sendStatus(StatusMessage, strlen(StatusMessage));
-  delay(50);
   while (digitalRead(1)); //LibAprs TX Led pin PB1 - wait for TX to finish
-  delay(50);
   RfPttOFF;
   AprsPinInput;
-  Serial.println(F("Status sent"));
-
   TxCount++;
 }
 
 void sendCompilation() {
   Serial.println(F("sendCompilation"));
   char sz[100];
-  sprintf(sz, "%s %s", __DATE__, __TIME__);
-  Serial.println(sz);
-
+  sprintf(sz, "M1GEO FW: %s %s", __DATE__, __TIME__);
   AprsPinOutput;
   RfPttON;
   delay(TxDelay);
   APRS_sendStatus(sz, strlen(sz));
-  delay(50);
   while (digitalRead(1)); //LibAprs TX Led pin PB1 - wait for TX to finish
-  delay(50);
   RfPttOFF;
   AprsPinInput;
-  Serial.println(F("Compilation sent"));
-
   TxCount++;
-
 }
 
 static void updateGpsData(int ms)
@@ -391,6 +383,14 @@ void freeMem() {
   Serial.print(F("Free RAM: "));
   Serial.print(freeMemory());
   Serial.println(F(" byte"));
+}
+
+void Pkts() {
+  Serial.print(F("Packets: "));
+  Serial.print(TxCount);
+  Serial.print(F(" TX / "));
+  Serial.print(RxCount);
+  Serial.print(F(" RX."));
 }
 
 void gpsDebug() {
@@ -454,7 +454,7 @@ static void printDateTime(TinyGPSDate &d, TinyGPSTime &t)
   else
   {
     char sz[32];
-    sprintf(sz, "%02d/%02d/%02d ", d.month(), d.day(), d.year());
+    sprintf(sz, "%02d/%02d/%02d ", d.day(), d.month(), d.year());
     Serial.print(sz);
   }
 
