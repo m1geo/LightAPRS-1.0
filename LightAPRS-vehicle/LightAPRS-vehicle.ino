@@ -1,7 +1,7 @@
 #include <LibAPRS.h>        //Modified version of https://github.com/markqvist/LibAPRS
 #include <SoftwareSerial.h>
 #include <TinyGPS++.h>      //https://github.com/mikalhart/TinyGPSPlus
-#include <LowPower.h>       //https://github.com/rocketscream/Low-Power
+//#include <LowPower.h>       //https://github.com/rocketscream/Low-Power
 #include <Wire.h>
 #include <Adafruit_BMP085.h>//https://github.com/adafruit/Adafruit-BMP085-Library
 #include <avr/wdt.h>
@@ -49,7 +49,7 @@ unsigned int MinimumInterval = 5;      // maximum rate, packet every <this> seco
 int          CourseChangeBeacon = 40;  // degrees before sending beacon
 unsigned int TxDelay = 350;            // milliseeconds tx delay
 boolean      aliveStatus = true;       // for tx status message on first wake-up just once.
-int          pathSize = 2;             // 2 for WIDE1-N,WIDE2-N ; 1 for WIDE2-N
+//int          pathSize = 2;             // 2 for WIDE1-N,WIDE2-N ; 1 for WIDE2-N
 
 static char telemetry_buff[100];// telemetry buffer
 uint16_t TxCount = 0;
@@ -95,7 +95,7 @@ void setup() {
   APRS_setSymbol(Symbol);
   APRS_setPreamble(1000UL); // DRA818 is slow!
   APRS_setTail(100UL);
-  APRS_setPathSize(pathSize);
+  //APRS_setPathSize(pathSize);  // Use standard LibAPRS (not modified version)
   //APRS_setPower(1);
   //APRS_setHeight(0);
   //APRS_setGain(3);
@@ -160,7 +160,7 @@ void loop() {
           previous_course = (int) gps.course.deg();
         }
         
-        APRS_setPathSize(pathSize);
+        //APRS_setPathSize(pathSize); // Use standard LibAPRS (not modified version)
         
         wdt_reset();
         sendLocation();
@@ -599,4 +599,22 @@ static void printStr(const char *str, int len)
   int slen = strlen(str);
   for (int i = 0; i < len; ++i)
     Serial.print(i < slen ? str[i] : ' ');
+}
+
+// taken from modified version of LibAPRS
+void APRS_sendStatus(void *_buffer, size_t length) {
+    size_t payloadLength = 1+length;
+
+    uint8_t *packet = (uint8_t*)malloc(payloadLength);
+    uint8_t *ptr = packet;
+    packet[0] = '>';
+    ptr++;
+
+    if (length > 0) {
+        uint8_t *buffer = (uint8_t *)_buffer;
+        memcpy(ptr, buffer, length);
+    }
+
+    APRS_sendPkt(packet, payloadLength);
+    free(packet);
 }
