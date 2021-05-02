@@ -13,6 +13,8 @@
 #define BattPin     A2
 #define PIN_DRA_RX  22
 #define PIN_DRA_TX  23
+#define TX_LED      PIN_PB1 // outlined in LibAPRS/src/devices.h
+#define RX_LED      PIN_PB2 // outlined in LibAPRS/src/devices.h
 
 
 #define ADC_REFERENCE REF_3V3
@@ -38,20 +40,21 @@ char  Symbol = '>'; // '/>' for car, '/k' for truck, for more info : http://www.
 bool alternateSymbolTable = false ; //false = '/' , true = '\'
 
 char Frequency[9] = "144.8000"; //default frequency. 144.3900 for US, 144.8000 for Europe
-
-char comment[50] = "GE07CAR"; // Max 43 char
-char StatusMessage[50] = "George LightAPRS-1.0 http://m1geo.com";
+char comment[35] = "George LibAPRS http://m1geo.com";
+char NoGPSMessage[20]  = "No satellite fix";
 //*****************************************************************************
 
 
 unsigned int BeaconInterval = 90;      // seconds sleep for next beacon (TX).
 unsigned int MinimumInterval = 5;      // maximum rate, packet every <this> seconds.
+unsigned int StationaryInterval = 300; // interval in seconds when not moving seconds.
 int          CourseChangeBeacon = 40;  // degrees before sending beacon
 unsigned int TxDelay = 350;            // milliseeconds tx delay
 boolean      aliveStatus = true;       // for tx status message on first wake-up just once.
 //int          pathSize = 2;             // 2 for WIDE1-N,WIDE2-N ; 1 for WIDE2-N
 
-static char telemetry_buff[100];// telemetry buffer
+static char status_buff[80];// telemetry buffer
+static char cse_spd_alt_buff[80];// telemetry buffer
 uint16_t TxCount = 0;
 uint16_t RxCount = 0;
 int previous_course = 0;
@@ -70,7 +73,7 @@ void setup() {
   pinMode(GpsVccPin, OUTPUT);
   pinMode(RfPwrHLPin, OUTPUT);
   pinMode(RfPttPin, OUTPUT);
-  //pinMode(BattPin, INPUT);
+  pinMode(BattPin, INPUT);
   pinMode(PIN_DRA_TX, INPUT);
 
   // Set initial conditions
@@ -119,9 +122,12 @@ void loop() {
   gpsDebug();
   
   if (aliveStatus) {
+    waitCCA();
     sendCompilation();
     wdt_reset();
     delay(1000);
+    updateStatus();
+    waitCCA();
     sendStatus();
     previous_status_time = millis();
     aliveStatus = false;
@@ -129,8 +135,9 @@ void loop() {
   }
 
   //send status message every 10 minutes
-  if ((millis() - previous_status_time) > 600000UL) {
+  if ((millis() - previous_status_time) > 180000UL) { //every 3 minutes
     wdt_reset();
+    waitCCA();
     sendStatus();
     previous_status_time = millis();
   }
@@ -138,7 +145,8 @@ void loop() {
   if ((gps.location.age() < 1000 || gps.location.isUpdated()) && gps.location.isValid()) {
     if (gps.satellites.isValid() && (gps.satellites.value() > 3)) {
       updatePosition();
-      updateTelemetry();
+      updateStatus();
+      updateCourseSpeedAlt();
 
       wdt_reset();
 
@@ -163,12 +171,25 @@ void loop() {
         //APRS_setPathSize(pathSize); // Use standard LibAPRS (not modified version)
         
         wdt_reset();
+        waitCCA();
         sendLocation();
         previous_location_time = millis();
       }
       
     } else {
-      Serial.println(F("Not enough sattelites"));
+      Serial.println(F("No satellites"));
+      if ((millis() - previous_location_time) > (StationaryInterval * 1000UL)) {
+        waitCCA();
+        sendNoGPS();
+        previous_location_time = millis();
+      }
+    }
+  } else {
+    Serial.println(F("Location not valid"));
+    if ((millis() - previous_location_time) > (StationaryInterval * 1000UL)) {
+      waitCCA();
+      sendNoGPS();
+      previous_location_time = millis();
     }
   }
   
@@ -376,55 +397,65 @@ void updatePosition() {
   APRS_setLon(lonStr);
 }
 
+void updateCourseSpeedAlt() {
+  sprintf(cse_spd_alt_buff, "%03d", gps.course.isValid() ? (int)gps.course.deg() : 0);
+  cse_spd_alt_buff[3] += '/';
+  sprintf(cse_spd_alt_buff + 4, "%03d", gps.speed.isValid() ? (int)gps.speed.knots() : 0);
+  cse_spd_alt_buff[7] = '/';
+  cse_spd_alt_buff[8] = 'A';
+  cse_spd_alt_buff[9] = '=';
+  sprintf(cse_spd_alt_buff + 10, "%06d", (long)gps.altitude.feet());
+  cse_spd_alt_buff[16] = ' ';
+  sprintf(cse_spd_alt_buff + 17, "%s", comment);
+}
 
-void updateTelemetry() {
-  sprintf(telemetry_buff, "%03d", gps.course.isValid() ? (int)gps.course.deg() : 0);
-  telemetry_buff[3] += '/';
-  sprintf(telemetry_buff + 4, "%03d", gps.speed.isValid() ? (int)gps.speed.knots() : 0);
-  telemetry_buff[7] = '/';
-  telemetry_buff[8] = 'A';
-  telemetry_buff[9] = '=';
-  sprintf(telemetry_buff + 10, "%06d", (long)gps.altitude.feet());
-  telemetry_buff[16] = ' ';
-  sprintf(telemetry_buff + 17, "%03d", TxCount);
-  telemetry_buff[20] = 'T';
-  telemetry_buff[21] = 'X';
-  telemetry_buff[22] = 'P';
-  telemetry_buff[23] = ' '; 
-  sprintf(telemetry_buff + 24, "%03d", RxCount);
-  telemetry_buff[27] = 'R';
-  telemetry_buff[28] = 'X';
-  telemetry_buff[29] = 'P';
-  telemetry_buff[30] = ' '; 
+void updateStatus() {  
+  sprintf(status_buff, "%03d", TxCount);
+  status_buff[3] = 'T';
+  status_buff[4] = 'P';
+  status_buff[5] = ' '; 
+  sprintf(status_buff + 6, "%03d", RxCount);
+  status_buff[9] = 'R';
+  status_buff[10] = 'P';
+  status_buff[11] = ' '; 
   float tempC = bmp.readTemperature();//-21.4;//
-  dtostrf(tempC, 6, 2, telemetry_buff + 31);
-  telemetry_buff[37] = 'C';
-  telemetry_buff[38] = ' '; float pressure = bmp.readPressure() / 100.0; //Pa to hPa
-  dtostrf(pressure, 7, 2, telemetry_buff + 39);
-  telemetry_buff[46] = 'h';
-  telemetry_buff[47] = 'P';
-  telemetry_buff[48] = 'a';
-  telemetry_buff[49] = ' ';
-  //dtostrf(readBatt(), 5, 2, telemetry_buff + 50);
-  dtostrf(0, 5, 2, telemetry_buff + 50);
-  telemetry_buff[55] = 'V';
-  telemetry_buff[56] = ' ';
-  sprintf(telemetry_buff + 57, "%02d", gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
-  telemetry_buff[59] = 'S';
-  telemetry_buff[60] = ' ';
-  sprintf(telemetry_buff + 61, "%s", comment);
+  dtostrf(tempC, 6, 2, status_buff + 11);
+  status_buff[16] = 'C';
+  status_buff[17] = ' '; float pressure = bmp.readPressure() / 100.0; //Pa to hPa
+  dtostrf(pressure, 7, 2, status_buff + 18);
+  status_buff[25] = 'h';
+  status_buff[26] = 'P';
+  status_buff[27] = 'a';
+  status_buff[28] = ' ';
+  dtostrf(readBatt(), 5, 2, status_buff + 29);
+  //dtostrf(0, 5, 2, status_buff + 50);
+  status_buff[34] = 'V';
+  status_buff[35] = ' ';
+  sprintf(status_buff + 36, "%02d", gps.satellites.isValid() ? (int)gps.satellites.value() : 0);
+  status_buff[37] = 'S';
+  status_buff[38] = '\0';
+}
+
+
+void waitCCA() {
+  while(digitalRead(RX_LED)) { 
+    wdt_reset();  // 104ms slot time (longer than default 100ms, so others have priority)
+    delay(52);
+    wdt_reset();
+    delay(52);
+  }
 }
 
 
 void sendLocation() {
-  Serial.print(F("Location sending with comment: "));
-  Serial.println(telemetry_buff); // telemetry buffer
+  Serial.print(F("Location sending with payload: "));
+  Serial.println(cse_spd_alt_buff); // telemetry buffer
   AprsPinOutput;
   RfPttON;
   delay(TxDelay);
-  APRS_sendLoc(telemetry_buff, strlen(telemetry_buff));
+  APRS_sendLoc(cse_spd_alt_buff, strlen(cse_spd_alt_buff));
   delay(50);
-  while (digitalRead(1)); //LibAprs TX Led pin PB1 - wait for TX to finish
+  while (digitalRead(TX_LED)); //LibAprs TX Led pin PB1 - wait for TX to finish
   RfPttOFF;
   AprsPinInput;
   TxCount++;
@@ -432,12 +463,27 @@ void sendLocation() {
 
 
 void sendStatus() {
-  Serial.println(F("sendStatus"));
+  Serial.print(F("sendStatus: "));
+  Serial.println(
+); // telemetry buffer
   AprsPinOutput;
   RfPttON;
   delay(TxDelay);
-  APRS_sendStatus(StatusMessage, strlen(StatusMessage));
-  while (digitalRead(1)); //LibAprs TX Led pin PB1 - wait for TX to finish
+  APRS_sendStatus(status_buff, strlen(status_buff));
+  while (digitalRead(TX_LED)); //LibAprs TX Led pin PB1 - wait for TX to finish
+  RfPttOFF;
+  AprsPinInput;
+  TxCount++;
+}
+
+
+void sendNoGPS() {
+  Serial.println(F("sendNoGPS"));
+  AprsPinOutput;
+  RfPttON;
+  delay(TxDelay);
+  APRS_sendStatus(NoGPSMessage, strlen(NoGPSMessage));
+  while (digitalRead(TX_LED)); //LibAprs TX Led pin PB1 - wait for TX to finish
   RfPttOFF;
   AprsPinInput;
   TxCount++;
@@ -445,14 +491,15 @@ void sendStatus() {
 
 
 void sendCompilation() {
-  Serial.println(F("sendCompilation"));
+  Serial.print(F("sendCompilation: "));
   char sz[100];
   sprintf(sz, "M1GEO FW: %s %s", __DATE__, __TIME__);
+  Serial.println(sz);
   AprsPinOutput;
   RfPttON;
   delay(TxDelay);
   APRS_sendStatus(sz, strlen(sz));
-  while (digitalRead(1)); //LibAprs TX Led pin PB1 - wait for TX to finish
+  while (digitalRead(TX_LED)); //LibAprs TX Led pin PB1 - wait for TX to finish
   RfPttOFF;
   AprsPinInput;
   TxCount++;
@@ -465,20 +512,20 @@ static void updateGpsData(int ms)
     delayMicroseconds(1); // wait for serial port to connect.
   }
   unsigned long start = millis();
-  unsigned long bekle = 0;
+  unsigned long wait = 0;
   do
   {
     while (Serial1.available() > 0) {
       char c;
       c = Serial1.read();
       gps.encode(c);
-      bekle = millis();
+      wait = millis();
     }
-    if (bekle != 0 && bekle + 10 < millis()) break;
+    if (wait != 0 && wait + 10 < millis()) break;
   } while (millis() - start < ms);
 }
 
-/*
+
 float readBatt() {
   float R1 = 560000.0; // 560K
   float R2 = 100000.0; // 100K
@@ -487,13 +534,14 @@ float readBatt() {
     value = analogRead(BattPin);
     delay(5);
     value = analogRead(BattPin);
+    analogRead(A0); // reset for audio receive
     value = value - 8;
     value = (value * 2.56) / 1024.0;
     value = value / (R2 / (R1 + R2));
   } while (value > 16.0);
   return value ;
 }
-*/
+
 
 void freeMem() {
   Serial.print(F("Free RAM: "));
